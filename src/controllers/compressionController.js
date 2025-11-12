@@ -42,7 +42,12 @@ async function compressPDF(config) {
       inputFile,
       outputFile,
       compressionLevel: settings.name,
-      processingTime: result.processingTime
+      processingTime: result.processingTime,
+      pageCount: result.pageCount,
+      imageStats: result.imageStats,
+      streamStats: result.streamStats,
+      fontStats: result.fontStats,
+      metadataStats: result.metadataStats
     });
 
     console.log(report);

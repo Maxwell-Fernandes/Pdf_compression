@@ -1,5 +1,10 @@
 const fs = require('fs');
 const { PDFDocument } = require('pdf-lib');
+const { compressImages } = require('./imageCompressor');
+const { optimizeStreams, deduplicateObjects } = require('./streamOptimizer');
+const { subsetFonts } = require('./fontSubsetter');
+const { stripMetadata } = require('./metadataStripper');
+const { logger } = require('../output/logger');
 
 async function processPDF(inputPath, outputPath, settings) {
   const startTime = Date.now();
@@ -18,7 +23,7 @@ async function processPDF(inputPath, outputPath, settings) {
     console.log(`  Pages: ${pageCount}`);
 
     // Apply compression settings based on level
-    await applyCompression(pdfDoc, settings);
+    const compressionStats = await applyCompression(pdfDoc, settings);
 
     // Save the compressed PDF
     const pdfBytes = await pdfDoc.save({
@@ -36,7 +41,8 @@ async function processPDF(inputPath, outputPath, settings) {
     return {
       success: true,
       processingTime,
-      pageCount
+      pageCount,
+      ...compressionStats
     };
   } catch (error) {
     throw new Error(`PDF processing failed: ${error.message}`);
@@ -44,26 +50,41 @@ async function processPDF(inputPath, outputPath, settings) {
 }
 
 async function applyCompression(pdfDoc, settings) {
-  // Remove metadata if configured
-  if (settings.removeMetadata === true) {
-    pdfDoc.setTitle('');
-    pdfDoc.setAuthor('');
-    pdfDoc.setSubject('');
-    pdfDoc.setKeywords([]);
-    pdfDoc.setProducer('');
-    pdfDoc.setCreator('');
+  const stats = {
+    imageStats: null,
+    streamStats: null,
+    fontStats: null,
+    metadataStats: null
+  };
+
+  try {
+    // Step 1: Strip metadata
+    logger.debug('Stripping metadata...');
+    stats.metadataStats = await stripMetadata(pdfDoc, settings);
+
+    // Step 2: Compress images
+    logger.debug('Compressing images...');
+    stats.imageStats = await compressImages(pdfDoc, settings);
+
+    // Step 3: Optimize streams
+    logger.debug('Optimizing streams...');
+    stats.streamStats = await optimizeStreams(pdfDoc, settings);
+
+    // Step 4: Subset fonts
+    logger.debug('Subsetting fonts...');
+    stats.fontStats = await subsetFonts(pdfDoc, settings);
+
+    // Step 5: Deduplicate objects (if extreme compression)
+    if (settings.objectCompression === 'maximum') {
+      logger.debug('Deduplicating objects...');
+      const dedupeStats = await deduplicateObjects(pdfDoc);
+      stats.deduplicationStats = dedupeStats;
+    }
+
+    return stats;
+  } catch (error) {
+    throw new Error(`Compression application failed: ${error.message}`);
   }
-
-  // Note: Full image compression, font subsetting, and stream optimization
-  // would require additional libraries and more complex processing.
-  // This is a basic implementation that demonstrates the architecture.
-  // Future enhancements will include:
-  // - Image extraction and compression using Sharp
-  // - Font subsetting
-  // - Content stream optimization
-  // - Object deduplication
-
-  return pdfDoc;
 }
 
 module.exports = { processPDF };
