@@ -3,6 +3,7 @@ const { PDFDocument, PDFImage, PDFName, PDFRawStream } = require('pdf-lib');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const pako = require('pako');
 
 /**
  * Extract and compress images from a PDF document
@@ -21,6 +22,7 @@ async function compressImages(pdfDoc, settings) {
     // Get all pages
     const pages = pdfDoc.getPages();
 
+    // Process each page
     for (let pageIndex = 0; pageIndex < pages.length; pageIndex++) {
       const page = pages[pageIndex];
 
@@ -36,23 +38,49 @@ async function compressImages(pdfDoc, settings) {
       if (!xObjects) continue;
 
       // Get all XObject entries
-      const xObjectEntries = xObjects.dict.entries();
+      const xObjectEntries = Array.from(xObjects.dict.entries());
+      const imagesToReplace = [];
 
+      // First pass: extract and compress all images
       for (const [name, ref] of xObjectEntries) {
         try {
           const xObject = xObjects.lookup(name);
 
+          // xObject is already the looked-up object, check if it has a dict property (stream) or is a dict
+          const objectDict = xObject?.dict || xObject;
+          if (!objectDict) continue;
+
           // Check if it's an image
-          const subtype = xObject?.lookup(PDFName.of('Subtype'));
+          const subtype = objectDict.get ? objectDict.get(PDFName.of('Subtype')) : objectDict.lookup(PDFName.of('Subtype'));
           if (subtype?.toString() !== '/Image') continue;
 
           stats.imagesProcessed++;
 
           // Extract and compress the image
-          await compressXObjectImage(pdfDoc, xObject, settings, stats);
+          const result = await compressXObjectImage(pdfDoc, xObject, ref, page, name, settings, stats);
+
+          if (result) {
+            imagesToReplace.push(result);
+          }
         } catch (error) {
           console.warn(`Warning: Failed to process image on page ${pageIndex + 1}: ${error.message}`);
           // Continue with next image
+        }
+      }
+
+      // Second pass: replace images in the XObject dictionary
+      // Note: pdf-lib makes direct replacement difficult, so we update the reference
+      for (const replacement of imagesToReplace) {
+        try {
+          const { embeddedImage, xObjectName } = replacement;
+
+          // Get the embedded image reference
+          const imageRef = embeddedImage.ref;
+
+          // Update the XObject dictionary to point to the new image
+          xObjects.dict.set(xObjectName, imageRef);
+        } catch (error) {
+          console.warn(`Warning: Failed to replace image ${replacement.xObjectName}: ${error.message}`);
         }
       }
     }
@@ -66,44 +94,81 @@ async function compressImages(pdfDoc, settings) {
 /**
  * Compress an individual XObject image
  */
-async function compressXObjectImage(pdfDoc, xObject, settings, stats) {
+async function compressXObjectImage(pdfDoc, xObject, xObjectRef, page, xObjectName, settings, stats) {
   try {
-    // Get image properties
-    const width = xObject.lookup(PDFName.of('Width'))?.asNumber();
-    const height = xObject.lookup(PDFName.of('Height'))?.asNumber();
-    const colorSpace = xObject.lookup(PDFName.of('ColorSpace'));
-    const bitsPerComponent = xObject.lookup(PDFName.of('BitsPerComponent'))?.asNumber() || 8;
+    // xObject is already looked up - access its dict or use it directly
+    const objectDict = xObject?.dict || xObject;
+    if (!objectDict) return null;
 
-    if (!width || !height) return;
+    // Get image properties - use get() for dict access
+    const widthObj = objectDict.get ? objectDict.get(PDFName.of('Width')) : objectDict.lookup(PDFName.of('Width'));
+    const heightObj = objectDict.get ? objectDict.get(PDFName.of('Height')) : objectDict.lookup(PDFName.of('Height'));
+
+    const width = widthObj?.asNumber ? widthObj.asNumber() : (typeof widthObj === 'number' ? widthObj : null);
+    const height = heightObj?.asNumber ? heightObj.asNumber() : (typeof heightObj === 'number' ? heightObj : null);
+
+    if (!width || !height) return null;
 
     // Calculate target dimensions based on DPI setting
     const targetDPI = settings.imageDPI;
-    const scaleFactor = Math.min(1, targetDPI / 300); // Assume original is 300 DPI
+    const scaleFactor = Math.min(1, targetDPI / 300);
     const targetWidth = Math.round(width * scaleFactor);
     const targetHeight = Math.round(height * scaleFactor);
 
-    // Skip if image is already small
-    if (width <= targetWidth && height <= targetHeight) {
-      return;
-    }
-
-    // Get the image data
-    const filter = xObject.lookup(PDFName.of('Filter'));
-    const filterName = filter?.toString();
-
-    // We'll track size for statistics
-    const stream = xObject.dict.lookup(PDFName.of('Length'));
-    const originalSize = stream?.asNumber() || 0;
+    // Get original size for statistics
+    const lengthObj = objectDict.get ? objectDict.get(PDFName.of('Length')) : objectDict.lookup(PDFName.of('Length'));
+    const originalSize = lengthObj?.asNumber ? lengthObj.asNumber() : 0;
     stats.originalImagesSize += originalSize;
 
-    // For now, we'll mark the image as processed
-    // Full implementation would extract pixel data, compress with sharp, and re-embed
-    // This is a simplified version that works with pdf-lib's limitations
+    // Skip if image is already small or no compression needed
+    if (width <= targetWidth && height <= targetHeight && originalSize < 10000) {
+      stats.compressedImagesSize += originalSize;
+      return null;
+    }
 
-    stats.compressedImagesSize += Math.round(originalSize * (settings.imageQuality / 100));
+    // Step 1: Extract image data
+    const imageData = await extractImageData(xObject);
+
+    if (!imageData) {
+      console.warn(`Could not extract image data, skipping compression`);
+      stats.compressedImagesSize += originalSize;
+      return null;
+    }
+
+    // Step 2: Compress with Sharp
+    const compressedData = await compressImageBuffer(imageData, settings);
+
+    if (!compressedData || !compressedData.buffer) {
+      console.warn(`Compression failed, skipping`);
+      stats.compressedImagesSize += originalSize;
+      return null;
+    }
+
+    // Step 3: Embed compressed image
+    const embeddedImage = await embedCompressedImage(pdfDoc, compressedData);
+
+    if (!embeddedImage) {
+      console.warn(`Could not embed compressed image, skipping`);
+      stats.compressedImagesSize += originalSize;
+      return null;
+    }
+
+    // Track compressed size
+    stats.compressedImagesSize += compressedData.buffer.length;
+
+    // Return the embedded image and reference info for replacement
+    return {
+      embeddedImage,
+      xObjectName,
+      originalWidth: width,
+      originalHeight: height,
+      newWidth: compressedData.width,
+      newHeight: compressedData.height
+    };
 
   } catch (error) {
-    throw new Error(`Failed to compress image: ${error.message}`);
+    console.warn(`Failed to compress image: ${error.message}`);
+    return null;
   }
 }
 
@@ -112,33 +177,146 @@ async function compressXObjectImage(pdfDoc, xObject, settings, stats) {
  */
 async function extractImageData(xObject) {
   try {
-    // This is a placeholder for actual image extraction
-    // In a full implementation, you would:
-    // 1. Decode the image stream based on the filter
-    // 2. Convert to a format Sharp can process
-    // 3. Return the image buffer
+    // xObject is already looked up - access its dict or use it directly
+    const objectDict = xObject?.dict || xObject;
+    if (!objectDict) return null;
+
+    // Get image properties - use get() for dict access
+    const widthObj = objectDict.get ? objectDict.get(PDFName.of('Width')) : objectDict.lookup(PDFName.of('Width'));
+    const heightObj = objectDict.get ? objectDict.get(PDFName.of('Height')) : objectDict.lookup(PDFName.of('Height'));
+    const colorSpace = objectDict.get ? objectDict.get(PDFName.of('ColorSpace')) : objectDict.lookup(PDFName.of('ColorSpace'));
+    const bitsObj = objectDict.get ? objectDict.get(PDFName.of('BitsPerComponent')) : objectDict.lookup(PDFName.of('BitsPerComponent'));
+    const filter = objectDict.get ? objectDict.get(PDFName.of('Filter')) : objectDict.lookup(PDFName.of('Filter'));
+
+    const width = widthObj?.asNumber ? widthObj.asNumber() : (typeof widthObj === 'number' ? widthObj : null);
+    const height = heightObj?.asNumber ? heightObj.asNumber() : (typeof heightObj === 'number' ? heightObj : null);
+    const bitsPerComponent = bitsObj?.asNumber ? bitsObj.asNumber() : (typeof bitsObj === 'number' ? bitsObj : 8);
+
+    if (!width || !height) {
+      return null;
+    }
+
+    // Get raw stream bytes
+    let imageBytes;
+    try {
+      // For stream objects, try to access contents
+      if (xObject.contents && typeof xObject.contents === 'function') {
+        imageBytes = xObject.contents();
+      } else if (xObject.contents) {
+        imageBytes = xObject.contents;
+      } else {
+        // No stream data available
+        return null;
+      }
+    } catch (e) {
+      console.warn('Could not extract image bytes:', e.message);
+      return null;
+    }
+
+    if (!imageBytes || imageBytes.length === 0) {
+      return null;
+    }
+
+    // Determine filter type
+    const filterName = filter?.toString();
+    let decodedData = imageBytes;
+
+    // Decode based on filter
+    if (filterName) {
+      if (filterName.includes('FlateDecode') || filterName === '/FlateDecode') {
+        try {
+          decodedData = pako.inflate(imageBytes);
+        } catch (e) {
+          console.warn('FlateDecode failed, using raw data:', e.message);
+        }
+      } else if (filterName.includes('DCTDecode') || filterName === '/DCTDecode') {
+        // JPEG data - can use directly
+        decodedData = imageBytes;
+      }
+      // For other filters, we'll try to use raw data
+    }
+
+    // Determine color space for Sharp
+    const colorSpaceStr = colorSpace?.toString() || '';
+    let channels = 3; // Default RGB
+    let sharpColorSpace = 'srgb';
+
+    if (colorSpaceStr.includes('DeviceGray') || colorSpaceStr === '/DeviceGray') {
+      channels = 1;
+      sharpColorSpace = 'b-w';
+    } else if (colorSpaceStr.includes('DeviceCMYK') || colorSpaceStr === '/DeviceCMYK') {
+      channels = 4;
+      sharpColorSpace = 'cmyk';
+    } else if (colorSpaceStr.includes('DeviceRGB') || colorSpaceStr === '/DeviceRGB') {
+      channels = 3;
+      sharpColorSpace = 'srgb';
+    }
+
+    // If this is JPEG data (DCTDecode), return it directly for Sharp
+    if (filterName && (filterName.includes('DCTDecode') || filterName === '/DCTDecode')) {
+      return {
+        buffer: Buffer.from(decodedData),
+        width,
+        height,
+        channels,
+        colorSpace: sharpColorSpace,
+        isJpeg: true
+      };
+    }
+
+    // For raw pixel data, create a proper buffer for Sharp
+    const expectedSize = width * height * channels;
+    if (decodedData.length >= expectedSize) {
+      return {
+        buffer: Buffer.from(decodedData.slice(0, expectedSize)),
+        width,
+        height,
+        channels,
+        colorSpace: sharpColorSpace,
+        isJpeg: false
+      };
+    }
 
     return null;
   } catch (error) {
-    throw new Error(`Failed to extract image: ${error.message}`);
+    console.warn(`Failed to extract image: ${error.message}`);
+    return null;
   }
 }
 
 /**
  * Compress image buffer using Sharp
  */
-async function compressImageBuffer(imageBuffer, settings, width, height) {
+async function compressImageBuffer(imageData, settings) {
   try {
+    const { buffer, width, height, channels, colorSpace, isJpeg } = imageData;
     const targetDPI = settings.imageDPI;
     const quality = settings.imageQuality;
 
-    // Calculate target dimensions
+    // Calculate target dimensions based on DPI
     const scaleFactor = Math.min(1, targetDPI / 300);
     const targetWidth = Math.round(width * scaleFactor);
     const targetHeight = Math.round(height * scaleFactor);
 
-    // Use Sharp to compress the image
-    const compressedBuffer = await sharp(imageBuffer)
+    let sharpImage;
+
+    // Create Sharp instance based on image type
+    if (isJpeg) {
+      // Already JPEG - can load directly
+      sharpImage = sharp(buffer);
+    } else {
+      // Raw pixel data - need to specify format
+      sharpImage = sharp(buffer, {
+        raw: {
+          width: width,
+          height: height,
+          channels: channels
+        }
+      });
+    }
+
+    // Apply compression with resizing
+    const compressedBuffer = await sharpImage
       .resize(targetWidth, targetHeight, {
         fit: 'inside',
         withoutEnlargement: true
@@ -150,7 +328,11 @@ async function compressImageBuffer(imageBuffer, settings, width, height) {
       })
       .toBuffer();
 
-    return compressedBuffer;
+    return {
+      buffer: compressedBuffer,
+      width: targetWidth,
+      height: targetHeight
+    };
   } catch (error) {
     throw new Error(`Sharp compression failed: ${error.message}`);
   }
@@ -159,19 +341,25 @@ async function compressImageBuffer(imageBuffer, settings, width, height) {
 /**
  * Embed compressed image back into PDF
  */
-async function embedCompressedImage(pdfDoc, imageBuffer, width, height) {
+async function embedCompressedImage(pdfDoc, compressedData) {
   try {
-    // Embed the compressed image
-    const image = await pdfDoc.embedJpg(imageBuffer);
-    return image;
-  } catch (error) {
-    // Try PNG if JPG fails
+    const { buffer, width, height } = compressedData;
+
+    // Try to embed as JPEG first (our compression outputs JPEG)
     try {
-      const image = await pdfDoc.embedPng(imageBuffer);
+      const image = await pdfDoc.embedJpg(buffer);
       return image;
-    } catch (pngError) {
-      throw new Error(`Failed to embed image: ${error.message}`);
+    } catch (jpgError) {
+      // If JPEG embedding fails, try PNG
+      try {
+        const image = await pdfDoc.embedPng(buffer);
+        return image;
+      } catch (pngError) {
+        throw new Error(`Failed to embed image as JPG or PNG: ${jpgError.message}`);
+      }
     }
+  } catch (error) {
+    throw new Error(`Failed to embed compressed image: ${error.message}`);
   }
 }
 

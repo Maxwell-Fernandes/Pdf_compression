@@ -23,13 +23,14 @@
   "dependencies": {
     "chalk": "^4.1.2",
     "commander": "^11.0.0",
+    "fast-glob": "^3.3.1",
+    "fontkit": "^2.0.4",
     "inquirer": "^8.2.5",
     "ora": "^5.4.1",
-    "pdf-lib": "^1.17.1",
-    "sharp": "^0.32.6",
     "pako": "^2.1.0",
-    "fast-glob": "^3.3.1",
-    "pdf2pic": "^3.0.3"
+    "pdf-lib": "^1.17.1",
+    "pdf2pic": "^3.0.3",
+    "sharp": "^0.32.6"
   },
   "devDependencies": {
     "eslint": "^8.50.0",
