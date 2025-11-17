@@ -5,8 +5,6 @@ node_modules/
 dist/
 build/
 coverage/
-*.pdf
-*.PDF
 !examples/sample.pdf
 .vscode/
 .idea/
