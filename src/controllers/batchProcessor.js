@@ -162,7 +162,13 @@ async function processSingleFile(
     // Show brief result
     const saved = result.originalSize - result.compressedSize;
     const ratio = ((saved / result.originalSize) * 100).toFixed(1);
-    logger.success(`  Saved ${logger.formatBytes(saved)} (${ratio}%)\n`);
+    const isCompressed = saved > 0;
+
+    if (isCompressed) {
+      logger.success(`  Saved ${logger.formatBytes(saved)} (${ratio}%)\n`);
+    } else {
+      logger.warn(`  Increased ${logger.formatBytes(Math.abs(saved))} (${ratio}%)\n`);
+    }
 
   } catch (error) {
     result.error = error.message;
@@ -183,15 +189,27 @@ function printBatchSummary(results) {
     ? ((totalSaved / results.totalOriginalSize) * 100).toFixed(2)
     : 0;
 
+  const isCompressed = totalSaved > 0;
+
+  // Format saved/increased with appropriate color
+  const savedStr = isCompressed
+    ? chalk.green(logger.formatBytes(totalSaved))
+    : chalk.red(logger.formatBytes(Math.abs(totalSaved)) + ' increased');
+
+  // Format compression ratio with appropriate color
+  const ratioStr = isCompressed
+    ? chalk.green(overallRatio + '%')
+    : chalk.red(overallRatio + '%');
+
   console.log(chalk.bold.cyan('\nBatch Processing Summary'));
   console.log(chalk.gray('═'.repeat(50)));
   console.log(`${chalk.bold('Total files:')}     ${results.total}`);
   console.log(`${chalk.bold('Successful:')}     ${chalk.green(results.successful)}`);
   console.log(`${chalk.bold('Failed:')}         ${results.failed > 0 ? chalk.red(results.failed) : results.failed}`);
   console.log(`\n${chalk.bold('Original size:')}  ${logger.formatBytes(results.totalOriginalSize)}`);
-  console.log(`${chalk.bold('Compressed:')}     ${logger.formatBytes(results.totalCompressedSize)}`);
-  console.log(`${chalk.bold('Total saved:')}    ${chalk.green(logger.formatBytes(totalSaved))}`);
-  console.log(`${chalk.bold('Compression:')}    ${chalk.green(overallRatio + '%')}`);
+  console.log(`${chalk.bold('Compressed:')}     ${isCompressed ? chalk.green(logger.formatBytes(results.totalCompressedSize)) : chalk.red(logger.formatBytes(results.totalCompressedSize))}`);
+  console.log(`${chalk.bold(isCompressed ? 'Total saved:' : 'Total increased:')}    ${savedStr}`);
+  console.log(`${chalk.bold('Compression:')}    ${ratioStr}`);
   console.log(chalk.gray('═'.repeat(50)));
 
   // List failed files if any
