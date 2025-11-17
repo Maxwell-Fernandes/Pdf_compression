@@ -18,6 +18,17 @@ function generateReport(data) {
 
   const savedBytes = originalSize - compressedSize;
   const compressionRatio = ((1 - (compressedSize / originalSize)) * 100).toFixed(2);
+  const isCompressed = savedBytes > 0;
+
+  // Format saved bytes with appropriate color
+  const savedBytesStr = isCompressed
+    ? chalk.green(logger.formatBytes(savedBytes))
+    : chalk.red(logger.formatBytes(Math.abs(savedBytes)) + ' increased');
+
+  // Format compression ratio with appropriate color
+  const compressionStr = isCompressed
+    ? chalk.green(compressionRatio + '%')
+    : chalk.red(compressionRatio + '%');
 
   let report = `
 ${chalk.bold.cyan('Compression Report')}
@@ -30,11 +41,11 @@ ${chalk.bold('Pages:')}     ${pageCount || 'N/A'}
 
 ${chalk.bold('File Sizes:')}
   Original:   ${chalk.yellow(logger.formatBytes(originalSize))}
-  Compressed: ${chalk.green(logger.formatBytes(compressedSize))}
-  Saved:      ${chalk.green(logger.formatBytes(savedBytes))}
+  Compressed: ${isCompressed ? chalk.green(logger.formatBytes(compressedSize)) : chalk.red(logger.formatBytes(compressedSize))}
+  ${isCompressed ? 'Saved' : 'Increased'}:      ${savedBytesStr}
 
 ${chalk.bold('Overall Statistics:')}
-  Compression: ${chalk.green(compressionRatio + '%')}
+  Compression: ${compressionStr}
   Time:        ${processingTime.toFixed(2)}s
 `;
 

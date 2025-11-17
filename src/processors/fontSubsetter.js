@@ -190,13 +190,25 @@ async function subsetFont(fontObject, usedGlyphs, stats) {
       return;
     }
 
-    // For fontDescriptor, it's looked up so use get() or lookup()
+    // For fontDescriptor, it's already looked up - it's a PDFDict object
+    // PDFDict objects have .get() method, not .lookup()
     const fontDescDict = fontDescriptor.dict || fontDescriptor;
 
-    // Get font file
-    const hasFile2 = fontDescDict.get ? fontDescDict.get(PDFName.of('FontFile2')) : fontDescDict.lookup(PDFName.of('FontFile2'));
-    const hasFile3 = fontDescDict.get ? fontDescDict.get(PDFName.of('FontFile3')) : fontDescDict.lookup(PDFName.of('FontFile3'));
-    const hasFile = fontDescDict.get ? fontDescDict.get(PDFName.of('FontFile')) : fontDescDict.lookup(PDFName.of('FontFile'));
+    // Get font file - use .get() for PDFDict objects
+    let hasFile2, hasFile3, hasFile;
+
+    if (typeof fontDescDict.get === 'function') {
+      hasFile2 = fontDescDict.get(PDFName.of('FontFile2'));
+      hasFile3 = fontDescDict.get(PDFName.of('FontFile3'));
+      hasFile = fontDescDict.get(PDFName.of('FontFile'));
+    } else if (typeof fontDescDict.lookup === 'function') {
+      hasFile2 = fontDescDict.lookup(PDFName.of('FontFile2'));
+      hasFile3 = fontDescDict.lookup(PDFName.of('FontFile3'));
+      hasFile = fontDescDict.lookup(PDFName.of('FontFile'));
+    } else {
+      // Can't access font descriptor
+      return;
+    }
 
     const fontFileKey = hasFile2 ? 'FontFile2' : hasFile3 ? 'FontFile3' : hasFile ? 'FontFile' : null;
 
@@ -205,7 +217,12 @@ async function subsetFont(fontObject, usedGlyphs, stats) {
       return;
     }
 
-    const fontFile = fontDescDict.get ? fontDescDict.get(PDFName.of(fontFileKey)) : fontDescDict.lookup(PDFName.of(fontFileKey));
+    let fontFile;
+    if (typeof fontDescDict.get === 'function') {
+      fontFile = fontDescDict.get(PDFName.of(fontFileKey));
+    } else if (typeof fontDescDict.lookup === 'function') {
+      fontFile = fontDescDict.lookup(PDFName.of(fontFileKey));
+    }
     if (!fontFile || !fontFile.contents) return;
 
     let fontData;

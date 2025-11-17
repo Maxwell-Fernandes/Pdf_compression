@@ -146,6 +146,21 @@ async function compressXObjectImage(pdfDoc, xObject, xObjectRef, page, xObjectNa
       return null;
     }
 
+    // CRITICAL FIX: Only use compressed image if it's actually smaller!
+    const compressedSize = compressedData.buffer.length;
+    const compressionRatio = compressedSize / originalSize;
+
+    // If compression made it larger or only slightly smaller, skip it
+    if (compressionRatio >= 0.95) {
+      if (process.env.DEBUG) {
+        console.log(`  Skipping image ${xObjectName} - compression ineffective (${(compressionRatio * 100).toFixed(1)}% of original, ${originalSize} → ${compressedSize} bytes)`);
+      }
+      stats.compressedImagesSize += originalSize;
+      return null;
+    } else if (process.env.DEBUG) {
+      console.log(`  Compressing image ${xObjectName}: ${originalSize} → ${compressedSize} bytes (${((1 - compressionRatio) * 100).toFixed(1)}% saved)`);
+    }
+
     // Step 2.5: Calculate quality metrics (if enabled)
     if (settings.calculateQualityMetrics) {
       try {
@@ -172,7 +187,7 @@ async function compressXObjectImage(pdfDoc, xObject, xObjectRef, page, xObjectNa
     }
 
     // Track compressed size
-    stats.compressedImagesSize += compressedData.buffer.length;
+    stats.compressedImagesSize += compressedSize;
 
     // Return the embedded image and reference info for replacement
     return {
