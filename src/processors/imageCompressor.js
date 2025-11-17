@@ -4,6 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const pako = require('pako');
+const { calculateQualityMetrics } = require('../utils/qualityMetrics');
 
 /**
  * Extract and compress images from a PDF document
@@ -15,7 +16,8 @@ async function compressImages(pdfDoc, settings) {
   const stats = {
     imagesProcessed: 0,
     originalImagesSize: 0,
-    compressedImagesSize: 0
+    compressedImagesSize: 0,
+    qualityMetrics: []
   };
 
   try {
@@ -142,6 +144,22 @@ async function compressXObjectImage(pdfDoc, xObject, xObjectRef, page, xObjectNa
       console.warn(`Compression failed, skipping`);
       stats.compressedImagesSize += originalSize;
       return null;
+    }
+
+    // Step 2.5: Calculate quality metrics (if enabled)
+    if (settings.calculateQualityMetrics) {
+      try {
+        const metrics = await calculateQualityMetrics(
+          compressedData.originalBuffer,
+          compressedData.buffer
+        );
+        stats.qualityMetrics.push({
+          imageName: xObjectName.toString(),
+          ...metrics
+        });
+      } catch (error) {
+        console.warn(`Quality metrics calculation skipped: ${error.message}`);
+      }
     }
 
     // Step 3: Embed compressed image
@@ -286,12 +304,14 @@ async function extractImageData(xObject) {
 
 /**
  * Compress image buffer using Sharp
+ * Supports JPEG, WebP, and PNG formats
  */
 async function compressImageBuffer(imageData, settings) {
   try {
     const { buffer, width, height, channels, colorSpace, isJpeg } = imageData;
     const targetDPI = settings.imageDPI;
     const quality = settings.imageQuality;
+    const format = settings.imageFormat || 'jpeg'; // Default to JPEG
 
     // Calculate target dimensions based on DPI
     const scaleFactor = Math.min(1, targetDPI / 300);
@@ -315,23 +335,60 @@ async function compressImageBuffer(imageData, settings) {
       });
     }
 
-    // Apply compression with resizing
-    const compressedBuffer = await sharpImage
-      .resize(targetWidth, targetHeight, {
-        fit: 'inside',
-        withoutEnlargement: true
-      })
-      .jpeg({
-        quality: quality,
-        progressive: true,
-        mozjpeg: true
-      })
-      .toBuffer();
+    // Resize image
+    sharpImage = sharpImage.resize(targetWidth, targetHeight, {
+      fit: 'inside',
+      withoutEnlargement: true
+    });
+
+    // Apply format-specific compression
+    let compressedBuffer;
+    let actualFormat = format;
+
+    switch (format) {
+      case 'webp':
+        // WebP typically provides better compression than JPEG
+        compressedBuffer = await sharpImage
+          .webp({
+            quality: quality,
+            effort: 6, // Balance between speed and compression
+            smartSubsample: true
+          })
+          .toBuffer();
+        break;
+
+      case 'png':
+        // Lossless PNG compression
+        compressedBuffer = await sharpImage
+          .png({
+            compressionLevel: 9,
+            adaptiveFiltering: true,
+            palette: quality < 80 // Use palette for lower quality settings
+          })
+          .toBuffer();
+        break;
+
+      case 'jpeg':
+      default:
+        // JPEG compression (default)
+        compressedBuffer = await sharpImage
+          .jpeg({
+            quality: quality,
+            progressive: true,
+            mozjpeg: true,
+            optimizeScans: true
+          })
+          .toBuffer();
+        actualFormat = 'jpeg';
+        break;
+    }
 
     return {
       buffer: compressedBuffer,
       width: targetWidth,
-      height: targetHeight
+      height: targetHeight,
+      format: actualFormat,
+      originalBuffer: buffer // Keep for quality comparison
     };
   } catch (error) {
     throw new Error(`Sharp compression failed: ${error.message}`);
