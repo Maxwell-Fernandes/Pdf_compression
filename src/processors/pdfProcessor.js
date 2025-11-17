@@ -1,7 +1,7 @@
 const fs = require('fs');
 const { PDFDocument } = require('pdf-lib');
 const { compressImages } = require('./imageCompressor');
-const { optimizeStreams, deduplicateObjects } = require('./streamOptimizer');
+const { optimizeStreams, deduplicateObjects, removeUnusedObjects } = require('./streamOptimizer');
 const { subsetFonts } = require('./fontSubsetter');
 const { stripMetadata } = require('./metadataStripper');
 const { logger } = require('../output/logger');
@@ -74,11 +74,17 @@ async function applyCompression(pdfDoc, settings) {
     logger.debug('Subsetting fonts...');
     stats.fontStats = await subsetFonts(pdfDoc, settings);
 
-    // Step 5: Deduplicate objects (if extreme compression)
-    if (settings.objectCompression === 'maximum') {
+    // Step 5: Advanced optimizations (disabled - need safer implementation)
+    // Object deduplication and unused object removal can break PDFs if not done carefully
+    // TODO: Implement safer deduplication that preserves PDF structure integrity
+    if (false && settings.objectCompression === 'maximum') {
       logger.debug('Deduplicating objects...');
       const dedupeStats = await deduplicateObjects(pdfDoc);
       stats.deduplicationStats = dedupeStats;
+
+      logger.debug('Removing unused objects...');
+      const unusedStats = await removeUnusedObjects(pdfDoc);
+      stats.unusedObjectStats = unusedStats;
     }
 
     return stats;

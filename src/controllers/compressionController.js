@@ -1,12 +1,14 @@
 const ora = require('ora');
 const fs = require('fs');
+const chalk = require('chalk');
 const { COMPRESSION_LEVELS } = require('../utils/constants');
 const { processPDF } = require('../processors/pdfProcessor');
+const { preScanPDF } = require('../processors/pdfPreScan');
 const { logger } = require('../output/logger');
 const { generateReport } = require('../output/reportGenerator');
 
 async function compressPDF(config) {
-  const { inputFile, compressionLevel, outputFile } = config;
+  const { inputFile, compressionLevel, outputFile, force = false, skipPreScan = false } = config;
 
   // Validate compression level
   if (!COMPRESSION_LEVELS[compressionLevel]) {
@@ -24,6 +26,35 @@ async function compressPDF(config) {
   }).start();
 
   try {
+    // Pre-scan PDF to estimate compression potential (unless skipped)
+    if (!skipPreScan && !force) {
+      spinner.text = 'Analyzing PDF...';
+      const scanResults = await preScanPDF(inputFile);
+
+      if (scanResults.isAlreadyOptimized) {
+        spinner.warn('PDF appears already optimized');
+        console.log('');
+        console.log(chalk.yellow('═'.repeat(60)));
+        console.log(chalk.yellow.bold('  Pre-Scan Analysis'));
+        console.log(chalk.yellow('═'.repeat(60)));
+        console.log(chalk.yellow(scanResults.recommendation.replace(/\\n/g, '\n')));
+        console.log(chalk.yellow('═'.repeat(60)));
+        console.log('');
+        console.log(chalk.gray('Use --force to compress anyway (not recommended)'));
+        console.log('');
+
+        // Don't throw error, just exit gracefully
+        return {
+          success: false,
+          skipped: true,
+          reason: 'PDF already optimized',
+          scanResults
+        };
+      } else if (parseFloat(scanResults.estimatedSavingsPercent) > 0) {
+        spinner.info(`Estimated compression: ~${scanResults.estimatedSavingsPercent}%`);
+      }
+    }
+
     // Update spinner
     spinner.text = `Compressing PDF with ${settings.name} level...`;
 

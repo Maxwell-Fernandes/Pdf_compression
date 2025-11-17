@@ -21,11 +21,13 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@neslinesli93/qpdf-wasm": "^0.3.0",
     "chalk": "^4.1.2",
     "commander": "^11.0.0",
     "fast-glob": "^3.3.1",
     "fontkit": "^2.0.4",
     "inquirer": "^8.2.5",
+    "node-qpdf2": "^6.0.0",
     "ora": "^5.4.1",
     "pako": "^2.1.0",
     "pdf-lib": "^1.17.1",
